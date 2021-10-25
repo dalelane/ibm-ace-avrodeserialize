@@ -59,3 +59,8 @@ The compute node implementation has compile and run-time dependencies on the fol
 The compute node implementation is based on schemas from an [Apicurio Schema Registry](https://www.apicur.io/registry/), such as the registry that is included with [IBM Event Streams](https://ibm.github.io/event-streams/) or run as [a stand-alone open source registry](https://www.apicur.io/registry/docs/apicurio-registry/2.1.0.Final/index.html).
 
 It can be simply modified to support the use of other schema registries - comments in the [Java compute node code](./AvroDeserialize.java) identify where these changes are needed.
+
+
+## Background
+
+https://dalelane.co.uk/blog/?p=4518
