@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<policies>
+  <policy policyType="UserDefined" policyName="schemaregistry" policyTemplate="UserDefined">
+    <schema.registry.url>https://my-schema-registry-host.com</schema.registry.url>
+    <schema.registry.username>my-registry-username</schema.registry.username>
+    <schema.registry.password>my-registry-password</schema.registry.password>
+    <schema.registry.encoding>binary</schema.registry.encoding>
+  </policy>
+</policies>
