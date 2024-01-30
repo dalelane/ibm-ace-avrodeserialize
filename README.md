@@ -11,7 +11,7 @@
 
 Sample compute node implementation for processing Kafka messages that have been serialized using Apache Avro schemas from a schema registry.
 
-It turns json-encoded or binary-encoded data into a JSON object that can be processed using standard native App Connect transformation nodes.
+It turns json-encoded or binary-encoded Avro data into a JSON object that can be processed using standard native App Connect transformation nodes. This can be used with messages that contain schema IDs in message headers, or with schema IDs in the message payload.
 
 ## Contents
 
@@ -51,12 +51,12 @@ A [sample policy is provided](./sample-policy.policyxml) and needs to be deploye
 
 The compute node implementation has compile and run-time dependencies on the following jars. See the IBM App Connect Enterprise documentation on [Adding Java code dependencies](https://www.ibm.com/docs/en/app-connect/12.0?topic=java-adding-code-dependencies) for guidance on how to do this.
 
-- [`avro-1.10.2.jar`](https://dlcdn.apache.org/avro/avro-1.10.2/java/avro-1.10.2.jar)
+- [`avro-1.11.3.jar`](https://dlcdn.apache.org/avro/avro-1.11.3/java/avro-1.11.3.jar)
 - `slf4j-api-1.7.25.jar`
 
 ### Schema Registry
 
-The compute node implementation is based on schemas from an [Apicurio Schema Registry](https://www.apicur.io/registry/), such as the registry that is included with [IBM Event Streams](https://ibm.github.io/event-streams/) or run as [a stand-alone open source registry](https://www.apicur.io/registry/docs/apicurio-registry/2.1.0.Final/index.html).
+The compute node implementation is based on schemas from an [Apicurio Schema Registry](https://www.apicur.io/registry/), such as the registry that is included with [IBM Event Streams](https://ibm.github.io/event-automation/es/) or run as [a stand-alone open source registry](https://www.apicur.io/registry/).
 
 It can be simply modified to support the use of other schema registries - comments in the [Java compute node code](./AvroDeserialize.java) identify where these changes are needed.
 

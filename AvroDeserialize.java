@@ -39,7 +39,7 @@ import com.ibm.broker.plugin.MbUserException;
  *  using Apache Avro schemas from an Apicurio schema registry.
  *
  * It is dependent on required configuration parameters from the
- *  {kafka}:schemaregistry policy.
+ *  {policies}:schemaregistry policy.
  *
  * It uses two output terminals:
  *  - "out" - JSON objects with deserialized Kafka messages are propogated
@@ -68,67 +68,87 @@ public class AvroDeserialize extends MbJavaComputeNode {
     //        <schema.registry.username>your-schema-registry-username</schema.registry.username>
     //        <schema.registry.password>your-schema-registry-password</schema.registry.password>
     //        <schema.registry.encoding>binary/json</schema.registry.encoding>
+	//        <schema.registry.id.length>8</schema.registry.id.length>
     //      </policy>
     //    </policies>
     //
 
-    /** Key for retrieving the URL for a schema registry from the {kafka}:schemaregistry policy. **/
+	// required parameters
+
+    /** Key for retrieving the URL for a schema registry from the {policies}:schemaregistry policy. **/
     private static final String POLICY_SCHEMA_REGISTRY_URL      = "schema.registry.url";
-    /** Key for retrieving the username for schema registry API calls from the {kafka}:schemaregistry policy. **/
+    /** Key for retrieving the username for schema registry API calls from the {policies}:schemaregistry policy. **/
     private static final String POLICY_SCHEMA_REGISTRY_USERNAME = "schema.registry.username";
-    /** Key for retrieving the password for schema registry API calls from the {kafka}:schemaregistry policy. **/
+    /** Key for retrieving the password for schema registry API calls from the {policies}:schemaregistry policy. **/
     private static final String POLICY_SCHEMA_REGISTRY_PASSWORD = "schema.registry.password";
-    /** Key for retrieving the binary/json encoding setting from the {kafka}:schemaregistry policy. **/
+
+    // optional parameters
+
+    /** Key for retrieving the binary/json encoding setting from the {policies}:schemaregistry policy. **/
     private static final String POLICY_SCHEMA_ENCODING          = "schema.registry.encoding";
+    /** Key for retrieving the length of IDs from the {policies}:schemaregistry policy. **/
+    private static final String POLICY_SCHEMA_ID_LENGTH_BYTES   = "schema.registry.id.length";
 
 
     // values retrieved from the policy
 
     /**
-     * Authorization HTTP header to use in API requests to the schema registry.
+     * Base URL for retrieving schemas from an Apicurio schema registry.
+     *  Schema IDs should be appended to this to create a complete URL.
      */
-    private static String SCHEMA_REGISTRY_AUTH_HEADER = "";
+    private String schemaRegistryBaseUrl = "";
 
     /**
-     * The decoding approach to use when deserializing Kafka message data.
+     * Authorization HTTP header to use in API requests to the schema registry.
      */
-    private static AvroEncodingApproach ENCODING_APPROACH = null;
+    private String schemaRegistryAuthHeader = "";
 
-
-
-
-    // ------------------------------------------------------------------------
-    //  CONSTANTS
-    // ------------------------------------------------------------------------
-
-    // expected message data:
-    //   byte  0   : should contain 0
-    //   bytes 1-9 : should contain the schema id as an 8-byte long
-    //   bytes 10- : should contain the serialized message data
+    /**
+     * The default decoding approach to use when deserializing Kafka message
+     *  data if there are no message headers specifying what to do.
+     */
+    private AvroEncodingApproach defaultEncodingApproach = null;
 
     /**
      * The number of bytes used in Kafka messages to store the schema ID.
      *
-     * This assumes that Kafka messages were produced with a schema ID
+     * The default assumes that Kafka messages were produced with a schema ID
      * handler set to io.apicurio.registry.serde.DefaultIdHandler which uses
      * an eight-byte long to encode schema IDs
      *
      * cf. https://www.apicur.io/registry/docs/apicurio-registry/2.1.0.Final/getting-started/assembly-using-kafka-client-serdes.html#registry-serdes-types-serde-registry
+     *
+     * If producing applications use the schema ID handler
+     *  io.apicurio.registry.serde.Legacy4ByteIdHandler this uses a
+     *  four-byte integer to encode schema IDs, they would use 4 to
+     *  represent Integer.BYTES instead.
      */
-    private static final int SCHEMA_ID_BYTES_LEN = Long.BYTES;
+    private int schemaIdBytesLength = Long.BYTES;
 
-    // The schema ID handler io.apicurio.registry.serde.Legacy4ByteIdHandler
-    //  uses a four-byte integer to encode schema IDs, so if processing
-    //  events using that, the following constant should be used instead.
+
+    // ------------------------------------------------------------------------
+    //  BYTE-ARRAY OFFSETS - for processing message payloads
+    // ------------------------------------------------------------------------
+
+    // If the ID is stored within the message payload {@link SchemaIdLocation#PAYLOAD}
+    //  the expected message data will be:
     //
-    // private static final int SCHEMA_ID_BYTES_LEN = Integer.BYTES;
+    //  with an 8-byte (Long.BYTES) id:
+	//   byte  0   : should contain 0
+    //   bytes 1-9 : should contain the schema id as an 8-byte long
+    //   bytes 10- : should contain the serialized message data
+    //
+    //  with a 4-byte (Integer.BYTES) id:
+	//   byte  0   : should contain 0
+    //   bytes 1-5 : should contain the schema id as a 4-byte int
+    //   bytes 6-  : should contain the serialized message data
 
     /** Index into the message bytes for the location of the magic byte. */
     private static final int BYTES_IDX_MAGICBYTE = 0;
     /** Index into the message bytes for the start of the schema id. */
     private static final int BYTES_IDX_SCHEMAID  = BYTES_IDX_MAGICBYTE + 1;
-    /** Index into the message bytes for the start of the serialized mesage contents. */
-    private static final int BYTES_IDX_MSGDATA   = BYTES_IDX_SCHEMAID + SCHEMA_ID_BYTES_LEN;
+    /** Index into the message bytes for the start of the serialized message contents. */
+    private int              BYTES_IDX_MSGDATA   = BYTES_IDX_SCHEMAID + schemaIdBytesLength;
 
 
 
@@ -182,7 +202,7 @@ public class AvroDeserialize extends MbJavaComputeNode {
      * onSetup() is called during the start of the message flow allowing
      * configuration to be read/cached, and endpoints to be registered.
      *
-     * This will retrieve configuration from the {kafka}:schemaregistry policy
+     * This will retrieve configuration from the {policies}:schemaregistry policy
      * which will link this compute node to that policy.
      *
      * The impact is that any subsequent re-deploys to that policy will cause
@@ -190,14 +210,24 @@ public class AvroDeserialize extends MbJavaComputeNode {
      */
     @Override
     public void onSetup() throws MbException {
-        //
-        // retrieve credentials for schema registry API calls from the policy
-        //   and use it to generate an HTTP Authorization header
-        //
         try {
+            // retrieve credentials for schema registry API calls from the policy
+            //   and use it to generate an HTTP Authorization header
             String auth = getSchemaRegistryUsername() + ":" + getSchemaRegistryPassword();
             byte[] encodedAuth = Base64.getEncoder().encode(auth.getBytes(StandardCharsets.UTF_8));
-            SCHEMA_REGISTRY_AUTH_HEADER = "Basic " + new String(encodedAuth);
+            schemaRegistryAuthHeader = "Basic " + new String(encodedAuth);
+
+            // base URL for fetching schemas - needs the schema ID appended
+            //  to the end to be used
+            schemaRegistryBaseUrl = getSchemaRegistryUrl() + "/ids/";
+
+            // default approach to use for deserializing (binary vs json)
+            //  but this can be overridden on a per-message basis through
+            //  message headers
+            defaultEncodingApproach = getDefaultSchemaEncoding();
+
+            // get length of IDs
+            schemaIdBytesLength = getSchemaIdLength();
         }
         catch (DeserializationFailedException exc) {
             throw new MbUserException(this, "onSetup()", "", "", exc.toString(), null);
@@ -216,20 +246,32 @@ public class AvroDeserialize extends MbJavaComputeNode {
     public void evaluate(MbMessageAssembly inAssembly) throws MbException {
         MbMessage inMessage = inAssembly.getMessage();
         try {
+        	AvroConfig config = getConfigFromHeaders(inAssembly.getLocalEnvironment().getRootElement());
+
             // get raw bytes that were retrieved from the
             //  Kafka topic by a KafkaConsumer node
             byte[] msgbytes = inMessage.getBuffer();
 
-            // get the schema ID from the message bytes
-            Long schemaId = getSchemaId(msgbytes);
+            // identify what subset of the bytes should be
+            //  deserialized
+            byte[] messagebytes;
+            if (config.idLocation == SchemaIdLocation.PAYLOAD) {
+                // if there was no schema ID provided in the header
+                //   get it from the message bytes, and look at the
+            	//   bytes following that as message payload
+            	config.schemaId = getSchemaId(msgbytes);
+            	messagebytes = Arrays.copyOfRange(msgbytes, BYTES_IDX_MSGDATA, msgbytes.length);
+            }
+            else { // idLocation == HEADER
+            	messagebytes = msgbytes;
+            }
 
             // create a decoder based on the message bytes
-            byte[] messagebytes = Arrays.copyOfRange(msgbytes, BYTES_IDX_MSGDATA, msgbytes.length);
             ByteArrayInputStream bais = new ByteArrayInputStream(messagebytes);
-            Decoder decoder = getDecoder(schemaId, bais);
+            Decoder decoder = getDecoder(config, bais);
 
             // deserialize the message data using the decoder
-            GenericDatumReader<GenericRecord> reader = getMessageReader(schemaId);
+            GenericDatumReader<GenericRecord> reader = getMessageReader(config.schemaId);
             GenericRecord record = reader.read(null, decoder);
 
             // create a new output JSON message with the deserialized data
@@ -277,6 +319,30 @@ public class AvroDeserialize extends MbJavaComputeNode {
     //  APP CONNECT ENTERPRISE LOGIC
     // ------------------------------------------------------------------------
 
+    /**
+     * Kafka messages can include information about how to deserialize the data
+     *  in message headers. This method looks that up using the ACE
+     *  representation of kafka headers.
+     */
+    private AvroConfig getConfigFromHeaders(MbElement environmentRoot) throws MbException {
+    	Long schemaId = null;
+    	MbElement idHeader = environmentRoot.getFirstElementByPath("/Kafka/Input/KafkaHeader/apicurio.value.globalId");
+    	if (idHeader != null) {
+	    	byte[] idHeaderBytes = ((String)idHeader.getValue()).getBytes();
+	    	schemaId = convertBytesToLong(idHeaderBytes);
+    	}
+
+    	AvroEncodingApproach encoding = null;
+    	MbElement encodingHeader = environmentRoot.getFirstElementByPath("/Kafka/Input/KafkaHeader/apicurio.value.encoding");
+    	if (encodingHeader != null) {
+	    	String encodingHeaderValue = encodingHeader.getValueAsString();
+	    	encoding = "JSON".equals(encodingHeaderValue) ? AvroEncodingApproach.JSON : AvroEncodingApproach.BINARY;
+    	}
+
+    	return new AvroConfig(schemaId, encoding);
+    }
+
+
     /** Copy headers from inMessage to outMessage. */
     public void copyMessageHeaders(MbMessage inMessage, MbMessage outMessage) throws MbException {
         MbElement outRoot = outMessage.getRootElement();
@@ -317,7 +383,7 @@ public class AvroDeserialize extends MbJavaComputeNode {
         // read the correct sequence of bytes from the message data
         byte[] idBytes = Arrays.copyOfRange(messageBytes,
                 BYTES_IDX_SCHEMAID,
-                BYTES_IDX_SCHEMAID + SCHEMA_ID_BYTES_LEN);
+                BYTES_IDX_SCHEMAID + schemaIdBytesLength);
 
         // convert into an id
         return convertBytesToLong(idBytes);
@@ -325,9 +391,9 @@ public class AvroDeserialize extends MbJavaComputeNode {
 
 
     /** Utility function for converting bytes to a Long value. */
-    private static long convertBytesToLong(final byte[] b) {
+    private long convertBytesToLong(final byte[] b) {
         long val = 0;
-        for (int i = 0; i < SCHEMA_ID_BYTES_LEN; i++) {
+        for (int i = 0; i < schemaIdBytesLength; i++) {
             val <<= Byte.SIZE;
             val |= (b[i] & 0xFF);
         }
@@ -346,6 +412,7 @@ public class AvroDeserialize extends MbJavaComputeNode {
     //  to be adjusted to match the API for that registry.
 
 
+
     /**
      * Retrieve an Avro schema from the schema registry.
      *
@@ -357,7 +424,7 @@ public class AvroDeserialize extends MbJavaComputeNode {
     private Schema getSchema(Long schemaId) throws DeserializationFailedException, MbException  {
         if (CACHED_SCHEMAS.containsKey(schemaId) == false) {
             // this URL pattern is based on the Apicurio API docs
-            String schemaUrl = getSchemaRegistryUrl() + "/ids/" + schemaId;
+            String schemaUrl = schemaRegistryBaseUrl + schemaId;
 
             // download the contents of the schema as a string
             String schemaSpec = downloadSchemaContents(schemaUrl);
@@ -381,7 +448,7 @@ public class AvroDeserialize extends MbJavaComputeNode {
     private String downloadSchemaContents(String url) throws DeserializationFailedException {
         try {
             URLConnection uc = new URL(url).openConnection();
-            uc.setRequestProperty ("Authorization", SCHEMA_REGISTRY_AUTH_HEADER);
+            uc.setRequestProperty ("Authorization", schemaRegistryAuthHeader);
             try (InputStream is = uc.getInputStream()){
                 BufferedReader br = new BufferedReader(new InputStreamReader(is));
                 String read = null;
@@ -428,21 +495,23 @@ public class AvroDeserialize extends MbJavaComputeNode {
      * Creates a decoder for decoding the provided message byte stream, for
      *  messages serialized using the schema with the provided id.
      */
-    private Decoder getDecoder(Long schemaId, ByteArrayInputStream bais) throws DeserializationFailedException, MbException {
-        if (ENCODING_APPROACH == null) {
-            // retrieve the type of decoder to create
-            //  from the schemaregistry policy
-            ENCODING_APPROACH = getSchemaEncoding();
+    private Decoder getDecoder(AvroConfig config, ByteArrayInputStream bais) throws DeserializationFailedException, MbException {
+
+    	AvroEncodingApproach encoding = config.encoding;
+        if (encoding == null) {
+        	// if not specified in the message header,
+        	//  use the default from the policy
+            encoding = defaultEncodingApproach;
         }
 
         try {
             // create a binary decoder
-            if (ENCODING_APPROACH == AvroEncodingApproach.BINARY) {
+            if (encoding == AvroEncodingApproach.BINARY) {
                 return DecoderFactory.get().binaryDecoder(bais, null);
             }
             // create a JSON decoder
-            else if (ENCODING_APPROACH == AvroEncodingApproach.JSON) {
-                return DecoderFactory.get().jsonDecoder(getSchema(schemaId), bais);
+            else if (encoding == AvroEncodingApproach.JSON) {
+                return DecoderFactory.get().jsonDecoder(getSchema(config.schemaId), bais);
             }
             // no other types are currently supported
             else {
@@ -461,16 +530,16 @@ public class AvroDeserialize extends MbJavaComputeNode {
     // ------------------------------------------------------------------------
 
     private String getSchemaRegistryUrl() throws DeserializationFailedException, MbException  {
-        return getRequiredConfigProperty(POLICY_SCHEMA_REGISTRY_URL);
+        return getRequiredStringConfig(POLICY_SCHEMA_REGISTRY_URL);
     }
     private String getSchemaRegistryUsername() throws DeserializationFailedException, MbException  {
-        return getRequiredConfigProperty(POLICY_SCHEMA_REGISTRY_USERNAME);
+        return getRequiredStringConfig(POLICY_SCHEMA_REGISTRY_USERNAME);
     }
     private String getSchemaRegistryPassword() throws DeserializationFailedException, MbException  {
-        return getRequiredConfigProperty(POLICY_SCHEMA_REGISTRY_PASSWORD);
+        return getRequiredStringConfig(POLICY_SCHEMA_REGISTRY_PASSWORD);
     }
-    private AvroEncodingApproach getSchemaEncoding() throws DeserializationFailedException, MbException {
-        String encoding = getRequiredConfigProperty(POLICY_SCHEMA_ENCODING);
+    private AvroEncodingApproach getDefaultSchemaEncoding() throws DeserializationFailedException, MbException {
+        String encoding = getStringConfig(POLICY_SCHEMA_ENCODING, "binary");
         switch (encoding) {
         case "json":
             return AvroEncodingApproach.JSON;
@@ -482,20 +551,48 @@ public class AvroDeserialize extends MbJavaComputeNode {
                                                      "Should be 'binary' or 'json'");
         }
     }
-
-    /** Utility function for retrieving a string from the schema registry policy. */
-    private String getRequiredConfigProperty(String parm) throws DeserializationFailedException, MbException {
-        MbPolicy policy = getPolicy("UserDefined", "{kafka}:schemaregistry");
-        if (policy == null) {
-            throw new DeserializationFailedException("Missing required policy: {kafka}:schemaregistry");
-        }
-        String val = policy.getStringPropertyValue(parm);
-        if (val == null || val.trim().length() == 0) {
-            throw new DeserializationFailedException("{kafka}:schemaregistry policy is missing required parameter " + parm);
-        }
-        return val;
+    private int getSchemaIdLength() throws DeserializationFailedException, MbException {
+    	return getIntConfig(POLICY_SCHEMA_ID_LENGTH_BYTES, Long.BYTES);
     }
 
+    /** Utility function for retrieving a string from the schema registry policy. */
+    private String getRequiredStringConfig(String parm) throws DeserializationFailedException, MbException {
+        MbPolicy policy = getPolicy();
+        if (policy.getPropertyNames().contains(parm)) {
+        	String val = policy.getStringPropertyValue(parm);
+        	if (val.trim().length() > 0) {
+        		return val;
+        	}
+        }
+        throw new DeserializationFailedException("{policies}:schemaregistry policy is missing required parameter " + parm);
+    }
+    /** Utility function for retrieving a string from the schema registry policy. */
+    private String getStringConfig(String parm, String defaultValue) throws DeserializationFailedException, MbException {
+        MbPolicy policy = getPolicy();
+        if (policy.getPropertyNames().contains(parm)) {
+        	String val = policy.getStringPropertyValue(parm);
+        	if (val.trim().length() > 0) {
+        		return val;
+        	}
+        }
+        return defaultValue;
+    }
+    /** Utility function for retrieving an integer from the schema registry policy. */
+    private Integer getIntConfig(String parm, Integer defaultValue) throws DeserializationFailedException, MbException {
+        MbPolicy policy = getPolicy();
+        if (policy.getPropertyNames().contains(parm)) {
+        	Integer val = policy.getIntegerPropertyValue(parm);
+	        return val;
+        }
+        return defaultValue;
+    }
+    private MbPolicy getPolicy() throws MbException, DeserializationFailedException {
+    	MbPolicy policy = getPolicy("UserDefined", "{policies}:schemaregistry");
+        if (policy == null) {
+            throw new DeserializationFailedException("Missing required policy: {policies}:schemaregistry");
+        }
+        return policy;
+    }
 
 
 
@@ -513,10 +610,29 @@ public class AvroDeserialize extends MbJavaComputeNode {
         }
     }
 
+
+    private class AvroConfig {
+    	final SchemaIdLocation idLocation;
+    	Long schemaId;
+    	final AvroEncodingApproach encoding;
+
+    	AvroConfig(Long idFromHeader, AvroEncodingApproach encoding) {
+    		this.schemaId = idFromHeader;
+    		idLocation = idFromHeader == null ? SchemaIdLocation.PAYLOAD : SchemaIdLocation.HEADER;
+    		this.encoding = encoding == null ? defaultEncodingApproach : encoding;
+    	}
+    }
+
+
     enum AvroEncodingApproach {
         /** Messages were encoded using a binary encoder, so a binary decoder is required to deserialize them. */
         BINARY,
         /** Messages were encoded using a JSON encoder, so a JSON decoder is required to deserialize them. */
         JSON;
+    }
+
+    enum SchemaIdLocation {
+    	HEADER,
+    	PAYLOAD;
     }
 }
